@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -43,11 +44,12 @@ func randomCandy() candy {
 //candyEaters
 
 type iCandyEater interface {
-	eat(iCandy, chan Result)
+	eat(iCandy, chan Result, *sync.WaitGroup)
 	isFree() bool
 	setFree(b bool)
 	setRoot(r *candyServiceBase)
 	getQueue() []iCandy
+	launchEat(c iCandy)
 }
 
 func (e *candyEater) getQueue() []iCandy {
@@ -59,7 +61,7 @@ type candyEater struct {
 	root *candyServiceBase
 }
 
-func (e candyEater) isFree() bool {
+func (e *candyEater) isFree() bool {
 	return e.free
 }
 
@@ -71,7 +73,7 @@ func (e *candyEater) setRoot(r *candyServiceBase) {
 	e.root = r
 }
 
-func (e *candyEater) eat(c iCandy, ch chan Result) {
+func (e *candyEater) eat(c iCandy, ch chan Result, wg *sync.WaitGroup) {
 
 	t := rand.Intn(4)
 	fmt.Println("Eating a candy: random = ", t, " flavour = ", c.getFlavour())
@@ -79,14 +81,16 @@ func (e *candyEater) eat(c iCandy, ch chan Result) {
 	if t == 3 {
 		r := Result{message: "I don't like this candy", err: errors.New("")}
 		ch <- r
+		wg.Done()
+		time.Sleep(1 * time.Second) // processing imitation
 	} else {
-		time.Sleep(time.Duration(t) * time.Second) // sleep imitates some time to eat a candy
+		time.Sleep(time.Duration(3) * time.Second) // sleep imitates some time to eat a candy
 		fmt.Println("Candy eaten, random time = ", t, " flavour = ", c.getFlavour())
 
 		ch <- Result{}
+		wg.Done()
 	}
 
-	// extract flavour from slice when candy is eaten
 	for i, a := range e.root.flavours {
 		if a == c.getFlavour() {
 			e.root.flavours = append(e.root.flavours[:i], e.root.flavours[i+1:]...)
@@ -101,20 +105,27 @@ func (e *candyEater) eat(c iCandy, ch chan Result) {
 }
 
 func (e *candyEater) eatNext() {
+
 	for i, a := range e.root.queue { // call next eat
 		if !contains(e.root.flavours, a.getFlavour()) {
-			err := make(chan Result)
-
 			e.setFree(false)
-			e.root.flavours = append(e.root.flavours, a.getFlavour())
+			e.root.flavours = append(e.root.flavours, a.getFlavour()) // add flavour to list of flavours
 
-			e.root.queue = append(e.root.queue[:i], e.root.queue[i+1:]...)
-			go e.eat(a, err)
+			e.root.queue = append(e.root.queue[:i], e.root.queue[i+1:]...) // extract candy from queue
+
+			var wg sync.WaitGroup
+			wg.Add(1)
+			err := make(chan Result, 1)
+			go e.eat(a, err, &wg)
+
+			wg.Wait()
+
 			res := <-err
 			if res.err != nil {
 				fmt.Println(res.message)
 			}
-			break
+
+			return
 		}
 	}
 }
@@ -142,19 +153,13 @@ func (b *candyServiceBase) addCandy(c iCandy) {
 		return
 	}
 
-	errs := make(chan Result, len(b.candyEaters))
-
 	for _, a := range b.candyEaters { // finding free candy eater
 
 		if a.isFree() {
-
-			go a.eat(c, errs)
-
-			// error check was meant to be here, but reading from channel causes unexpected behaviour
-			// any eat function calls view candy queue as empty
-
 			a.setFree(false)
 			b.flavours = append(b.flavours, c.getFlavour())
+
+			go a.launchEat(c)
 			return
 		}
 
@@ -166,14 +171,31 @@ func (b *candyServiceBase) addCandy(c iCandy) {
 
 }
 
+func (e *candyEater) launchEat(c iCandy) {
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	err := make(chan Result, 1)
+	go e.eat(c, err, &wg)
+
+	wg.Wait()
+
+	res := <-err
+	if res.err != nil {
+		fmt.Println(res.message)
+	}
+
+}
+
 func main() {
 
 	candies := []iCandy{candy{flavour: 2}, candy{flavour: 3}, candy{flavour: 2}, candy{flavour: 4}, candy{flavour: 1}, candy{flavour: 1}}
 
 	var eaters []iCandyEater
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		eaters = append(eaters, &candyEater{free: true})
 	}
+
 	s := newCandyServiceBase(eaters)
 
 	for _, a := range candies {
